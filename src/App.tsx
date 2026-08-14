@@ -61,15 +61,22 @@ export default function App() {
 
   const socketRef = useRef<Socket | null>(null);
 
-  // Build base HTTP URL from IP & Port
-  const getServerHttpUrl = (ip: string, port: string) => {
-    const cleanIp = ip.replace(/^https?:\/\//, '').trim();
-    const isDomain = cleanIp.includes('.') && !/^\d+\.\d+\.\d+\.\d+$/.test(cleanIp);
-    const protocol = window.location.protocol === 'https:' && isDomain ? 'https:' : 'http:';
-    if (isDomain && (cleanIp.includes('run.app') || cleanIp.includes('localhost'))) {
-      return `${protocol}//${cleanIp}${port && port !== '80' && port !== '443' && !cleanIp.includes(':') ? `:${port}` : ''}`;
+  // Build base HTTP URL from IP & Port cleanly
+  const getServerHttpUrl = (ipInput: string, portInput: string) => {
+    let clean = (ipInput || '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+    let port = (portInput || '3000').trim();
+
+    if (clean.includes(':')) {
+      const parts = clean.split(':');
+      clean = parts[0];
+      port = parts[1] || port;
     }
-    return `${protocol}//${cleanIp}:${port || '3000'}`;
+
+    if (clean.includes('run.app')) {
+      return `https://${clean}`;
+    }
+
+    return `http://${clean}:${port || '3000'}`;
   };
 
   // Connect to PC Socket.IO and fetch real songs
@@ -84,9 +91,10 @@ export default function App() {
 
     const newSocket = io(serverUrl, {
       reconnection: true,
-      reconnectionAttempts: 10,
+      reconnectionAttempts: 15,
       reconnectionDelay: 1000,
-      timeout: 6000
+      timeout: 8000,
+      transports: ['websocket', 'polling']
     });
 
     newSocket.on('connect', () => {
@@ -95,8 +103,23 @@ export default function App() {
       setConnectionError(null);
       localStorage.setItem('maandiko_server_ip', ip);
       localStorage.setItem('maandiko_server_port', port);
-      // Demander et récupérer les chants via WebSocket et REST
-      newSocket.emit('demander-chants');
+
+      // 1. Demander via WebSocket avec callback immédiat
+      newSocket.emit('demander-chants', (dataSongs: Song[]) => {
+        if (Array.isArray(dataSongs) && dataSongs.length > 0) {
+          setSongs(dataSongs);
+          setSelectedSong(prev => prev || dataSongs[0]);
+          setLoadingSongs(false);
+        }
+      });
+
+      newSocket.emit('demander-recueils', (dataRecs: Recueil[]) => {
+        if (Array.isArray(dataRecs) && dataRecs.length > 0) {
+          setRecueils(dataRecs);
+        }
+      });
+
+      // 2. Fetch REST HTTP de secours
       fetchRealData(serverUrl);
     });
 
@@ -166,34 +189,70 @@ export default function App() {
   const fetchRealData = async (baseUrl: string) => {
     setLoadingSongs(true);
     try {
-      // 1. Fetch Recueils (try direct URL, fallback to relative proxy)
-      let resRecueils = await fetch(`${baseUrl}/api/recueils`).catch(() => null);
-      if (!resRecueils || !resRecueils.ok) {
-        resRecueils = await fetch('/api/recueils').catch(() => null);
-      }
-
-      if (resRecueils && resRecueils.ok) {
-        const dataRec: Recueil[] = await resRecueils.json();
-        setRecueils(dataRec);
-      }
-
-      // 2. Fetch All Songs (try direct URL, fallback to relative proxy)
-      let resSongs = await fetch(`${baseUrl}/api/songs`).catch(() => null);
-      if (!resSongs || !resSongs.ok) {
-        resSongs = await fetch('/api/songs').catch(() => null);
-      }
-
-      if (resSongs && resSongs.ok) {
-        const dataSongs: Song[] = await resSongs.json();
-        if (Array.isArray(dataSongs) && dataSongs.length > 0) {
-          setSongs(dataSongs);
-          setSelectedSong(prev => prev || dataSongs[0]);
+      // 1. Fetch Recueils
+      const ctrlRec = new AbortController();
+      const tRec = setTimeout(() => ctrlRec.abort(), 4000);
+      try {
+        let resRecueils = await fetch(`${baseUrl}/api/recueils`, { signal: ctrlRec.signal, cache: 'no-cache' }).catch(() => null);
+        if (!resRecueils || !resRecueils.ok) {
+          resRecueils = await fetch('/api/recueils', { signal: ctrlRec.signal, cache: 'no-cache' }).catch(() => null);
         }
+        if (resRecueils && resRecueils.ok) {
+          const dataRec: Recueil[] = await resRecueils.json();
+          if (Array.isArray(dataRec) && dataRec.length > 0) {
+            setRecueils(dataRec);
+          }
+        }
+      } finally {
+        clearTimeout(tRec);
+      }
+
+      // 2. Fetch All Songs
+      const ctrlSongs = new AbortController();
+      const tSongs = setTimeout(() => ctrlSongs.abort(), 4000);
+      try {
+        let resSongs = await fetch(`${baseUrl}/api/songs`, { signal: ctrlSongs.signal, cache: 'no-cache' }).catch(() => null);
+        if (!resSongs || !resSongs.ok) {
+          resSongs = await fetch('/api/songs', { signal: ctrlSongs.signal, cache: 'no-cache' }).catch(() => null);
+        }
+
+        if (resSongs && resSongs.ok) {
+          const dataSongs: Song[] = await resSongs.json();
+          if (Array.isArray(dataSongs) && dataSongs.length > 0) {
+            setSongs(dataSongs);
+            setSelectedSong(prev => prev || dataSongs[0]);
+          }
+        }
+      } finally {
+        clearTimeout(tSongs);
       }
     } catch (err) {
       console.warn("Info chargement chants:", err);
     } finally {
       setLoadingSongs(false);
+    }
+  };
+
+  // Trigger manual refresh
+  const handleManualSync = () => {
+    if (socketRef.current && socketRef.current.connected) {
+      setLoadingSongs(true);
+      socketRef.current.emit('demander-chants', (dataSongs: Song[]) => {
+        if (Array.isArray(dataSongs) && dataSongs.length > 0) {
+          setSongs(dataSongs);
+          setSelectedSong(prev => prev || dataSongs[0]);
+        }
+        setLoadingSongs(false);
+      });
+      socketRef.current.emit('demander-recueils', (dataRecs: Recueil[]) => {
+        if (Array.isArray(dataRecs) && dataRecs.length > 0) {
+          setRecueils(dataRecs);
+        }
+      });
+      const serverUrl = getServerHttpUrl(serverIp, serverPort);
+      fetchRealData(serverUrl);
+    } else {
+      connectSocket(serverIp, serverPort);
     }
   };
 
@@ -646,6 +705,21 @@ export default function App() {
               )}
             </div>
           </div>
+        ) : songs.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-64 text-center text-slate-400 text-xs space-y-3 px-4">
+            <Music className="w-12 h-12 text-slate-600 animate-pulse" />
+            <p className="text-sm font-bold text-slate-200">Aucun cantique chargé</p>
+            <p className="text-[11px] text-slate-400 max-w-xs">
+              Vérifiez que le logiciel MaAndiko est bien ouvert sur le PC, puis touchez le bouton ci-dessous.
+            </p>
+            <button
+              onClick={handleManualSync}
+              className="mt-2 px-4 py-2.5 bg-amber-500 hover:bg-amber-400 active:bg-amber-600 text-slate-950 font-bold rounded-xl shadow-lg flex items-center gap-2 transition"
+            >
+              <RefreshCw className="w-4 h-4" />
+              <span>Synchroniser les cantiques</span>
+            </button>
+          </div>
         ) : (
           <div className="flex flex-col items-center justify-center h-64 text-center text-slate-500 text-xs space-y-3">
             <Music className="w-12 h-12 text-slate-700" />
@@ -657,11 +731,11 @@ export default function App() {
       {/* 7. BOTTOM BAR QUICK SWITCHER */}
       <footer className="bg-slate-900 border-t border-slate-800 px-3.5 py-2 flex items-center justify-between text-xs text-slate-400 flex-shrink-0">
         <span className="font-mono text-[11px]">
-          {filteredSongs.length} cantiques affichés
+          {filteredSongs.length} cantique{filteredSongs.length > 1 ? 's' : ''} disponible{filteredSongs.length > 1 ? 's' : ''}
         </span>
         <button 
-          onClick={() => connectSocket(serverIp, serverPort)}
-          className="flex items-center gap-1 text-amber-400 font-bold hover:underline"
+          onClick={handleManualSync}
+          className="flex items-center gap-1 text-amber-400 font-bold hover:underline py-1 px-2 rounded-lg hover:bg-slate-800 transition"
         >
           <RefreshCw className="w-3.5 h-3.5" /> Synchroniser PC
         </button>
