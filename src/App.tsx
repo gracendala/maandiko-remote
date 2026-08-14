@@ -38,11 +38,15 @@ export default function App() {
   const [connectionError, setConnectionError] = useState<string | null>(null);
 
   // Real Data from PC Server
-  const [recueils, setRecueils] = useState<Recueil[]>([]);
+  const [recueils, setRecueils] = useState<Recueil[]>(() => {
+    return [
+      { id: 'ce', title: "Cantiques de l'Évangile", songsCount: DEFAULT_SONGS.length }
+    ];
+  });
   const [selectedRecueilId, setSelectedRecueilId] = useState<string>('all');
-  const [songs, setSongs] = useState<Song[]>([]);
+  const [songs, setSongs] = useState<Song[]>(DEFAULT_SONGS);
   const [loadingSongs, setLoadingSongs] = useState<boolean>(false);
-  const [selectedSong, setSelectedSong] = useState<Song | null>(null);
+  const [selectedSong, setSelectedSong] = useState<Song | null>(DEFAULT_SONGS[0] || null);
   const [searchQuery, setSearchQuery] = useState<string>('');
   
   // Worship Setlist / Programme
@@ -96,8 +100,47 @@ export default function App() {
       setConnectionError(null);
       localStorage.setItem('maandiko_server_ip', ip);
       localStorage.setItem('maandiko_server_port', port);
-      // Fetch real data from server
+      // Demander et récupérer les chants via WebSocket et REST
+      newSocket.emit('demander-chants');
       fetchRealData(serverUrl);
+    });
+
+    newSocket.on('liste-recueils', (data: Recueil[]) => {
+      if (Array.isArray(data) && data.length > 0) {
+        setRecueils(data);
+      }
+    });
+
+    newSocket.on('liste-chants', (data: Song[]) => {
+      if (Array.isArray(data) && data.length > 0) {
+        setSongs(data);
+        setSelectedSong(prev => {
+          if (!prev) return data[0];
+          const found = data.find(s => s.id === prev.id);
+          return found || prev;
+        });
+        setLoadingSongs(false);
+      }
+    });
+
+    newSocket.on('song-updated', (song: Song) => {
+      if (song && song.id) {
+        setSongs(prev => {
+          const idx = prev.findIndex(s => s.id === song.id);
+          if (idx >= 0) {
+            const next = [...prev];
+            next[idx] = song;
+            return next;
+          }
+          return [...prev, song];
+        });
+      }
+    });
+
+    newSocket.on('song-deleted', (songId: string) => {
+      if (songId) {
+        setSongs(prev => prev.filter(s => s.id !== songId));
+      }
     });
 
     newSocket.on('disconnect', () => {
