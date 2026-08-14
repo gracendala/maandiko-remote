@@ -21,7 +21,6 @@ import {
   X
 } from 'lucide-react';
 import { Song, SongSection, Recueil, ProjectedData } from './types';
-import { DEFAULT_SONGS } from './data/defaultSongs';
 
 export default function App() {
   // Network Config
@@ -37,16 +36,12 @@ export default function App() {
   const [isConnecting, setIsConnecting] = useState<boolean>(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
 
-  // Real Data from PC Server
-  const [recueils, setRecueils] = useState<Recueil[]>(() => {
-    return [
-      { id: 'ce', title: "Cantiques de l'Évangile", songsCount: DEFAULT_SONGS.length }
-    ];
-  });
+  // Real Data from PC Server (100% dynamic from server database)
+  const [recueils, setRecueils] = useState<Recueil[]>([]);
   const [selectedRecueilId, setSelectedRecueilId] = useState<string>('all');
-  const [songs, setSongs] = useState<Song[]>(DEFAULT_SONGS);
+  const [songs, setSongs] = useState<Song[]>([]);
   const [loadingSongs, setLoadingSongs] = useState<boolean>(false);
-  const [selectedSong, setSelectedSong] = useState<Song | null>(DEFAULT_SONGS[0] || null);
+  const [selectedSong, setSelectedSong] = useState<Song | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
   
   // Worship Setlist / Programme
