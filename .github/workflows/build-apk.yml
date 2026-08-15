@@ -39,6 +39,7 @@ jobs:
       - name: Add and Sync Android Platform
         run: |
           npx cap add android || true
+          npx --yes @capacitor/assets generate --android || true
           npx cap sync android
 
       - name: Build Android Debug APK

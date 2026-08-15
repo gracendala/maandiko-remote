@@ -373,9 +373,15 @@ export default function App() {
       {/* ==================== BARRE SUPÉRIEURE (HEADER) ==================== */}
       <header className="h-16 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-4 shrink-0 shadow-md">
         <div className="flex items-center gap-3 min-w-0">
-          <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
-            <Music className="w-5 h-5" />
-          </div>
+          <img 
+            src="icon.png" 
+            alt="Logo" 
+            className="w-10 h-10 rounded-xl object-contain bg-slate-800/80 border border-slate-700/60 p-1 shrink-0" 
+            onError={(e) => {
+              // fallback si l'image ne charge pas
+              (e.currentTarget as HTMLElement).style.display = 'none';
+            }}
+          />
           <div className="min-w-0">
             <h1 className="font-bold text-sm sm:text-base text-white tracking-tight flex items-center gap-2 truncate">
               Télécommande Cantiques

@@ -1,0 +1,21 @@
+{
+  "short_name": "MaAndiko Remote",
+  "name": "MaAndiko Remote - Télécommande Régie",
+  "icons": [
+    {
+      "src": "icon.png",
+      "type": "image/png",
+      "sizes": "512x512"
+    },
+    {
+      "src": "favicon.ico",
+      "type": "image/x-icon",
+      "sizes": "64x64 32x32 24x24 16x16"
+    }
+  ],
+  "start_url": "./",
+  "background_color": "#020617",
+  "theme_color": "#0f172a",
+  "display": "standalone",
+  "orientation": "portrait"
+}
