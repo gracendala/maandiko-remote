@@ -13,299 +13,172 @@ import {
   Sliders, 
   Check, 
   Radio, 
-  BookOpen, 
-  ListPlus, 
+  ListOrdered,
+  PlusCircle,
   X, 
   Layers, 
-  ExternalLink,
-  Laptop
+  ArrowLeft,
+  Sparkles
 } from 'lucide-react';
-import { Song, SongSection, Recueil, ProjectedData } from './types';
+import { Song, SongSection, ProgramItem, ProjectedData } from './types';
 
 export default function App() {
-  // Network Configuration
+  // Configuration Réseau
   const [serverIp, setServerIp] = useState<string>(() => {
-    return localStorage.getItem('maandiko_server_ip') || (window.location.hostname || '');
+    return localStorage.getItem('protext_remote_server_ip') || (window.location.hostname || '192.168.1.35');
   });
   const [serverPort, setServerPort] = useState<string>(() => {
-    return localStorage.getItem('maandiko_server_port') || (window.location.port || '3000');
+    return localStorage.getItem('protext_remote_server_port') || (window.location.port || '3000');
   });
 
   const [connected, setConnected] = useState<boolean>(false);
-  const [showConnectionConfig, setShowConnectionConfig] = useState<boolean>(false);
-  const [isConnecting, setIsConnecting] = useState<boolean>(false);
-  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [showConfigModal, setShowConfigModal] = useState<boolean>(false);
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
+  const [statusMessage, setStatusMessage] = useState<string>('');
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
 
-  // Synchronized Data from PC Régie (100% Dynamic from PC)
-  const [recueils, setRecueils] = useState<Recueil[]>([]);
-  const [selectedRecueilId, setSelectedRecueilId] = useState<string>('all');
-  const [songs, setSongs] = useState<Song[]>([]);
-  const [loadingSongs, setLoadingSongs] = useState<boolean>(false);
-  const [selectedSong, setSelectedSong] = useState<Song | null>(null);
-
-  // Search & Filter
-  const [searchQuery, setSearchQuery] = useState<string>('');
-  const [showSongPickerModal, setShowSongPickerModal] = useState<boolean>(false);
-
-  // Worship Setlist / Programme (Local to remote session)
-  const [programSongs, setProgramSongs] = useState<Song[]>(() => {
+  // Programme du Culte (Synchronisé avec la Régie PC - Vide par défaut tant que le PC n'a rien envoyé)
+  const [programItems, setProgramItems] = useState<ProgramItem[]>(() => {
     try {
-      const saved = localStorage.getItem('maandiko_remote_program');
+      const saved = localStorage.getItem('protext_remote_worship_program');
       return saved ? JSON.parse(saved) : [];
     } catch {
       return [];
     }
   });
-  const [activeTab, setActiveTab] = useState<'all' | 'program'>('all');
 
-  // Live Projection State from PC Régie
+  // Chant sélectionné pour affichage des strophes
+  const [selectedSong, setSelectedSong] = useState<Song | null>(null);
+  const [selectedProgramIndex, setSelectedProgramIndex] = useState<number | null>(null);
+
+  // État de projection en direct
   const [projectedData, setProjectedData] = useState<ProjectedData | null>(null);
-  const [activeSectionId, setActiveSectionId] = useState<string | null>(null);
+
+  // Modal d'ajout express d'un chant
+  const [showAddSongModal, setShowAddSongModal] = useState<boolean>(false);
+  const [allSongsCache, setAllSongsCache] = useState<Song[]>([]);
+  const [searchSongQuery, setSearchSongQuery] = useState<string>('');
 
   const socketRef = useRef<Socket | null>(null);
 
-  // Normalize song object
-  const normalizeSongs = (rawSongs: any[]): Song[] => {
-    if (!Array.isArray(rawSongs)) return [];
-    return rawSongs.map(s => {
-      let sections = s.sections;
-      if (typeof sections === 'string') {
-        try {
-          sections = JSON.parse(sections);
-        } catch {
-          sections = [];
-        }
+  // Formater URL du serveur
+  const getFullServerUrl = (ip: string, port: string) => {
+    let cleanIp = (ip || '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+    let cleanPort = (port || '3000').trim();
+    if (!cleanIp) cleanIp = window.location.hostname || 'localhost';
+    if (cleanPort === '80' || !cleanPort) return `http://${cleanIp}`;
+    return `http://${cleanIp}:${cleanPort}`;
+  };
+
+  // Normaliser un chant
+  const normalizeSong = (s: any): Song => {
+    let sections = s.sections;
+    if (typeof sections === 'string') {
+      try {
+        sections = JSON.parse(sections);
+      } catch {
+        sections = [];
       }
-      return {
-        id: s.id || `song-${s.number || Date.now()}`,
-        recueil_id: s.recueil_id || 'ce',
-        number: `${s.number || ''}`,
-        title: s.title || 'Sans titre',
-        category: s.category || '',
-        author: s.author || '',
-        keySignature: s.keySignature || s.key_signature || '',
-        sections: Array.isArray(sections) ? sections : []
-      };
-    });
+    }
+    return {
+      id: s.id || `song-${s.number || Date.now()}`,
+      recueil_id: s.recueil_id || 'ce',
+      number: `${s.number || ''}`,
+      title: s.title || 'Sans titre',
+      category: s.category || "Cantiques de l'Épouse",
+      author: s.author || '',
+      keySignature: s.keySignature || s.key_signature || '',
+      sections: Array.isArray(sections) ? sections : []
+    };
   };
 
-  // Build clean server HTTP URL
-  const getServerHttpUrl = (ipInput: string, portInput: string) => {
-    let clean = (ipInput || '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
-    let port = (portInput || '3000').trim();
-
-    if (!clean) {
-      clean = window.location.hostname || 'localhost';
+  // Sauvegarder localement le programme
+  useEffect(() => {
+    try {
+      localStorage.setItem('protext_remote_worship_program', JSON.stringify(programItems));
+    } catch (e) {
+      console.error(e);
     }
+  }, [programItems]);
 
-    if (clean.includes(':')) {
-      const parts = clean.split(':');
-      clean = parts[0];
-      port = parts[1] || port;
-    }
+  // Initialisation et gestion de la connexion Socket.IO
+  const connectToServer = (targetIp: string, targetPort: string) => {
+    const url = getFullServerUrl(targetIp, targetPort);
+    console.log("🔌 Tentative de connexion au PC de régie sur:", url);
+    setStatusMessage(`Connexion à ${url}...`);
 
-    if (clean.includes('run.app')) {
-      return `https://${clean}`;
-    }
-
-    return `http://${clean}:${port || '3000'}`;
-  };
-
-  // Connect to PC Socket.IO and pull all songs & recueils from PC
-  const connectSocket = (ip: string, port: string) => {
     if (socketRef.current) {
+      socketRef.current.removeAllListeners();
       socketRef.current.disconnect();
     }
 
-    setIsConnecting(true);
-    setConnectionError(null);
-    const serverUrl = getServerHttpUrl(ip, port);
-
-    const newSocket = io(serverUrl, {
-      reconnection: true,
-      reconnectionAttempts: 25,
-      reconnectionDelay: 1000,
-      timeout: 10000,
-      transports: ['websocket', 'polling']
-    });
-
-    newSocket.on('connect', () => {
-      setConnected(true);
-      setIsConnecting(false);
-      setConnectionError(null);
-      setLastSyncTime(new Date().toLocaleTimeString());
-      localStorage.setItem('maandiko_server_ip', ip);
-      localStorage.setItem('maandiko_server_port', port);
-
-      // 1. Demande prioritaire des données via WebSocket avec accusé de réception
-      setLoadingSongs(true);
-      newSocket.emit('demander-chants', (dataSongs: any[]) => {
-        if (Array.isArray(dataSongs)) {
-          const normalized = normalizeSongs(dataSongs);
-          setSongs(normalized);
-          setSelectedSong(prev => {
-            if (!prev && normalized.length > 0) return normalized[0];
-            const found = normalized.find(s => s.id === prev?.id);
-            return found || (normalized.length > 0 ? normalized[0] : null);
-          });
-          setLoadingSongs(false);
-        }
-      });
-
-      newSocket.emit('demander-recueils', (dataRecs: Recueil[]) => {
-        if (Array.isArray(dataRecs)) {
-          setRecueils(dataRecs);
-        }
-      });
-
-      // 2. Requête HTTP REST de secours
-      fetchDataFromPC(serverUrl);
-    });
-
-    newSocket.on('liste-recueils', (data: Recueil[]) => {
-      if (Array.isArray(data)) {
-        setRecueils(data);
-        setLastSyncTime(new Date().toLocaleTimeString());
-      }
-    });
-
-    newSocket.on('liste-chants', (data: any[]) => {
-      if (Array.isArray(data)) {
-        const normalized = normalizeSongs(data);
-        setSongs(normalized);
-        setSelectedSong(prev => {
-          if (!prev && normalized.length > 0) return normalized[0];
-          const found = normalized.find(s => s.id === prev?.id);
-          return found || (normalized.length > 0 ? normalized[0] : null);
-        });
-        setLoadingSongs(false);
-        setLastSyncTime(new Date().toLocaleTimeString());
-      }
-    });
-
-    newSocket.on('song-updated', (song: any) => {
-      if (song && song.id) {
-        const normalized = normalizeSongs([song])[0];
-        setSongs(prev => {
-          const idx = prev.findIndex(s => s.id === normalized.id);
-          if (idx >= 0) {
-            const next = [...prev];
-            next[idx] = normalized;
-            return next;
-          }
-          return [normalized, ...prev];
-        });
-        setSelectedSong(prev => (prev?.id === normalized.id ? normalized : prev));
-      }
-    });
-
-    newSocket.on('song-deleted', (songId: string) => {
-      if (songId) {
-        setSongs(prev => prev.filter(s => s.id !== songId));
-        setSelectedSong(prev => (prev?.id === songId ? null : prev));
-      }
-    });
-
-    newSocket.on('disconnect', () => {
-      setConnected(false);
-      setIsConnecting(false);
-    });
-
-    newSocket.on('connect_error', () => {
-      setConnected(false);
-      setIsConnecting(false);
-      setConnectionError(`Impossible de joindre le PC sur ${serverUrl}. Vérifiez l'adresse IP affichée sur la régie.`);
-    });
-
-    // Écoute de l'état actuel de projection sur la régie
-    newSocket.on('afficher-paragraphe', (data: ProjectedData) => {
-      setProjectedData(data);
-      if (data && data.module === 'lyrics') {
-        setActiveSectionId(data.numero ? `${data.numero}` : null);
-      } else if (!data || !data.texte || data.sermonId === 'BLACK' || data.animPhase === 'EXITING' || data.animPhase === 'OUT') {
-        setActiveSectionId(null);
-      }
+    const newSocket = io(url, {
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 10,
+      reconnectionDelay: 2000,
+      timeout: 10000
     });
 
     socketRef.current = newSocket;
-  };
 
-  // Requête REST HTTP pour récupérer les cantiques de la régie
-  const fetchDataFromPC = async (baseUrl: string) => {
-    try {
-      // 1. Recueils
-      const ctrlRec = new AbortController();
-      const tRec = setTimeout(() => ctrlRec.abort(), 4000);
-      try {
-        let resRec = await fetch(`${baseUrl}/api/recueils`, { signal: ctrlRec.signal, cache: 'no-cache' }).catch(() => null);
-        if (!resRec || !resRec.ok) {
-          resRec = await fetch('/api/recueils', { signal: ctrlRec.signal, cache: 'no-cache' }).catch(() => null);
-        }
-        if (resRec && resRec.ok) {
-          const dataRec: Recueil[] = await resRec.json();
-          if (Array.isArray(dataRec) && dataRec.length > 0) {
-            setRecueils(dataRec);
+    newSocket.on('connect', () => {
+      console.log('✅ Connecté au serveur ProText Régie!');
+      setConnected(true);
+      setStatusMessage('Connecté à la régie PC');
+      localStorage.setItem('protext_remote_server_ip', targetIp);
+      localStorage.setItem('protext_remote_server_port', targetPort);
+      setLastSyncTime(new Date().toLocaleTimeString());
+
+      // Demander immédiatement le programme du culte et les chants
+      newSocket.emit('demander-programme-culte');
+      newSocket.emit('demander-chants');
+    });
+
+    newSocket.on('disconnect', () => {
+      console.warn('❌ Déconnecté de la régie.');
+      setConnected(false);
+      setStatusMessage('Déconnecté de la régie');
+    });
+
+    newSocket.on('connect_error', (err) => {
+      console.warn('⚠️ Erreur de connexion:', err.message);
+      setConnected(false);
+      setStatusMessage(`Erreur: Vérifiez l'IP ${targetIp}`);
+    });
+
+    // Réception du programme du culte en temps réel
+    newSocket.on('programme-culte-maj', (data: any[]) => {
+      console.log('📋 Programme du culte reçu:', data?.length || 0, 'éléments');
+      if (Array.isArray(data) && data.length > 0) {
+        const formatted = data.map(item => {
+          if (item.type === 'song' && item.song) {
+            return { ...item, song: normalizeSong(item.song) };
           }
-        }
-      } finally {
-        clearTimeout(tRec);
-      }
-
-      // 2. Cantiques
-      const ctrlSongs = new AbortController();
-      const tSongs = setTimeout(() => ctrlSongs.abort(), 4000);
-      try {
-        let resSongs = await fetch(`${baseUrl}/api/songs`, { signal: ctrlSongs.signal, cache: 'no-cache' }).catch(() => null);
-        if (!resSongs || !resSongs.ok) {
-          resSongs = await fetch('/api/songs', { signal: ctrlSongs.signal, cache: 'no-cache' }).catch(() => null);
-        }
-
-        if (resSongs && resSongs.ok) {
-          const rawSongs = await resSongs.json();
-          if (Array.isArray(rawSongs) && rawSongs.length > 0) {
-            const normalized = normalizeSongs(rawSongs);
-            setSongs(normalized);
-            setSelectedSong(prev => prev || normalized[0]);
-          }
-        }
-      } finally {
-        clearTimeout(tSongs);
-      }
-    } catch (err) {
-      console.warn("Info synchronisation REST:", err);
-    } finally {
-      setLoadingSongs(false);
-    }
-  };
-
-  // Synchronisation manuelle déclenchée par l'utilisateur
-  const handleManualSync = () => {
-    if (socketRef.current && socketRef.current.connected) {
-      setLoadingSongs(true);
-      socketRef.current.emit('demander-chants', (dataSongs: any[]) => {
-        if (Array.isArray(dataSongs)) {
-          const normalized = normalizeSongs(dataSongs);
-          setSongs(normalized);
-          setSelectedSong(prev => prev || normalized[0]);
-        }
-        setLoadingSongs(false);
+          return item;
+        });
+        setProgramItems(formatted);
         setLastSyncTime(new Date().toLocaleTimeString());
-      });
-      socketRef.current.emit('demander-recueils', (dataRecs: Recueil[]) => {
-        if (Array.isArray(dataRecs)) {
-          setRecueils(dataRecs);
-        }
-      });
-      const serverUrl = getServerHttpUrl(serverIp, serverPort);
-      fetchDataFromPC(serverUrl);
-    } else {
-      connectSocket(serverIp, serverPort);
-    }
+      }
+    });
+
+    // Réception de la liste globale des chants (pour recherche rapide)
+    newSocket.on('liste-chants', (rawSongs: any[]) => {
+      if (Array.isArray(rawSongs) && rawSongs.length > 0) {
+        const normalized = rawSongs.map(normalizeSong);
+        setAllSongsCache(normalized);
+      }
+    });
+
+    // Synchronisation en direct de l'affichage vidéo-projeté
+    newSocket.on('afficher-paragraphe', (projData: ProjectedData) => {
+      setProjectedData(projData);
+    });
   };
 
+  // Connexion au montage
   useEffect(() => {
-    connectSocket(serverIp, serverPort);
+    connectToServer(serverIp, serverPort);
+
     return () => {
       if (socketRef.current) {
         socketRef.current.disconnect();
@@ -313,615 +186,574 @@ export default function App() {
     };
   }, []);
 
-  // Sauvegarder le programme local
-  useEffect(() => {
+  // Fonction d'actualisation manuelle
+  const handleManualSync = async () => {
+    setIsSyncing(true);
+    setStatusMessage('Actualisation en cours...');
+
+    if (socketRef.current && socketRef.current.connected) {
+      socketRef.current.emit('demander-programme-culte');
+      socketRef.current.emit('demander-chants');
+    }
+
+    // Essayer également via HTTP en secours
+    const url = getFullServerUrl(serverIp, serverPort);
     try {
-      localStorage.setItem('maandiko_remote_program', JSON.stringify(programSongs));
-    } catch {
-      // ignore
-    }
-  }, [programSongs]);
-
-  // Projeter une strophe / refrain vers la régie PC
-  const handleProjectSection = (song: Song, section: SongSection, index: number) => {
-    const songTitle = `N° ${song.number} - ${song.title}`;
-    const sectionLabel = section.label || `Couplet ${index + 1}`;
-
-    const payload: ProjectedData = {
-      sermonId: 'LYRICS',
-      numero: sectionLabel,
-      texte: section.text,
-      estExtrait: false,
-      titre_francais: songTitle,
-      module: 'lyrics',
-      animPhase: 'ENTERING',
-      timestamp: Date.now()
-    };
-
-    setProjectedData(payload);
-    setActiveSectionId(sectionLabel);
-
-    if (socketRef.current && socketRef.current.connected) {
-      socketRef.current.emit('projeter-paragraphe', payload);
-    }
-  };
-
-  // Masquer l'écran (Écran noir)
-  const handleClearProjection = () => {
-    const payload: ProjectedData = {
-      sermonId: 'BLACK',
-      numero: '',
-      texte: '',
-      estExtrait: false,
-      titre_francais: '',
-      module: 'lyrics',
-      animPhase: 'EXITING',
-      timestamp: Date.now()
-    };
-
-    setProjectedData(payload);
-    setActiveSectionId(null);
-
-    if (socketRef.current && socketRef.current.connected) {
-      socketRef.current.emit('projeter-paragraphe', payload);
-    }
-  };
-
-  // Navigation strophe suivante / précédente
-  const handleNavigateSection = (direction: 'next' | 'prev') => {
-    if (!selectedSong || !selectedSong.sections || selectedSong.sections.length === 0) return;
-    const currentIndex = selectedSong.sections.findIndex(s => s.label === activeSectionId || (projectedData && projectedData.texte === s.text));
-    
-    let targetIndex = 0;
-    if (currentIndex !== -1) {
-      targetIndex = direction === 'next' ? currentIndex + 1 : currentIndex - 1;
-    } else {
-      targetIndex = direction === 'next' ? 0 : selectedSong.sections.length - 1;
-    }
-
-    if (targetIndex >= 0 && targetIndex < selectedSong.sections.length) {
-      handleProjectSection(selectedSong, selectedSong.sections[targetIndex], targetIndex);
-    }
-  };
-
-  // Gestion du programme de culte
-  const toggleProgram = (song: Song) => {
-    setProgramSongs(prev => {
-      const exists = prev.some(s => s.id === song.id);
-      if (exists) {
-        return prev.filter(s => s.id !== song.id);
-      } else {
-        return [...prev, song];
+      const res = await fetch(`${url}/api/programme-culte`, { signal: AbortSignal.timeout(4000) });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data) && data.length > 0) {
+          const formatted = data.map(item => {
+            if (item.type === 'song' && item.song) {
+              return { ...item, song: normalizeSong(item.song) };
+            }
+            return item;
+          });
+          setProgramItems(formatted);
+          setLastSyncTime(new Date().toLocaleTimeString());
+          setStatusMessage('Programme synchronisé');
+        }
       }
-    });
+    } catch (e) {
+      console.warn("Échec requête HTTP secours:", e);
+    } finally {
+      setTimeout(() => setIsSyncing(false), 500);
+    }
   };
 
-  // Filtrage des cantiques
+  // Projeter une strophe / refrain
+  const handleProjectSection = (song: Song, section: SongSection) => {
+    if (!socketRef.current || !socketRef.current.connected) {
+      alert("⚠️ Vous n'êtes pas connecté au PC de la régie. Vérifiez l'adresse IP dans les paramètres.");
+      return;
+    }
+
+    const data: ProjectedData = {
+      sermonId: song.title,
+      numero: section.label,
+      texte: section.text,
+      titre_francais: `N° ${song.number} - ${song.title}`,
+      type_structure: 'CANTIQUE',
+      module: 'lyrics',
+      timestamp: Date.now()
+    };
+
+    socketRef.current.emit('projeter-paragraphe', data);
+    setProjectedData(data);
+  };
+
+  // Masquer l'écran (Écran Noir)
+  const handleBlackScreen = () => {
+    if (socketRef.current && socketRef.current.connected) {
+      socketRef.current.emit('projeter-paragraphe', null);
+    }
+    setProjectedData(null);
+  };
+
+  // Navigation vers la strophe suivante / précédente
+  const handleNextSection = () => {
+    if (!selectedSong || !selectedSong.sections || selectedSong.sections.length === 0) return;
+    
+    // Trouver l'index de la strophe actuellement projetée
+    const currentText = projectedData?.texte || '';
+    const currentIndex = selectedSong.sections.findIndex(s => s.text === currentText);
+    
+    if (currentIndex === -1) {
+      // Projeter la première strophe
+      handleProjectSection(selectedSong, selectedSong.sections[0]);
+    } else if (currentIndex < selectedSong.sections.length - 1) {
+      handleProjectSection(selectedSong, selectedSong.sections[currentIndex + 1]);
+    }
+  };
+
+  const handlePrevSection = () => {
+    if (!selectedSong || !selectedSong.sections || selectedSong.sections.length === 0) return;
+    
+    const currentText = projectedData?.texte || '';
+    const currentIndex = selectedSong.sections.findIndex(s => s.text === currentText);
+    
+    if (currentIndex > 0) {
+      handleProjectSection(selectedSong, selectedSong.sections[currentIndex - 1]);
+    }
+  };
+
+  // Ouvrir un chant du programme
+  const handleOpenSongFromProgram = (item: ProgramItem, index: number) => {
+    if (item.song) {
+      setSelectedSong(item.song);
+      setSelectedProgramIndex(index);
+    }
+  };
+
+  // Ajouter un chant au programme depuis la recherche express
+  const handleAddSongToProgram = (song: Song) => {
+    const newItem: ProgramItem = {
+      id: `prog-${Date.now()}`,
+      songId: song.id,
+      type: 'song',
+      title: song.title,
+      number: song.number,
+      category: song.category,
+      song: song
+    };
+
+    const newProg = [...programItems, newItem];
+    setProgramItems(newProg);
+
+    // Mettre à jour la régie PC
+    if (socketRef.current && socketRef.current.connected) {
+      socketRef.current.emit('mettre-a-jour-programme-culte', newProg);
+    }
+
+    setShowAddSongModal(false);
+    setSelectedSong(song);
+    setSelectedProgramIndex(newProg.length - 1);
+  };
+
+  // Chants filtrés pour la recherche express
   const filteredSongs = useMemo(() => {
-    const source = activeTab === 'program' ? programSongs : songs;
-    let list = source;
-
-    if (selectedRecueilId !== 'all' && activeTab !== 'program') {
-      list = list.filter(s => {
-        if (selectedRecueilId === 'ce') {
-          return s.recueil_id === 'ce' || (s.category && s.category.includes('Épouse'));
-        }
-        if (selectedRecueilId === 'saf') {
-          return s.recueil_id === 'saf' || (s.category && s.category.includes('Ailes'));
-        }
-        if (selectedRecueilId === 'cv') {
-          return s.recueil_id === 'cv' || (s.category && s.category.includes('Victoire'));
-        }
-        return s.recueil_id === selectedRecueilId;
-      });
-    }
-
-    if (!searchQuery.trim()) return list;
-
-    const q = searchQuery.toLowerCase().trim();
-    return list.filter(s => 
-      s.number.toLowerCase().includes(q) ||
-      s.title.toLowerCase().includes(q) ||
-      (s.author && s.author.toLowerCase().includes(q)) ||
-      (s.sections && s.sections.some(sec => sec.text.toLowerCase().includes(q)))
-    );
-  }, [songs, programSongs, selectedRecueilId, activeTab, searchQuery]);
-
-  const isCurrentSectionLive = (section: SongSection) => {
-    if (!projectedData || !projectedData.texte || projectedData.sermonId === 'BLACK' || projectedData.animPhase === 'EXITING' || projectedData.animPhase === 'OUT') {
-      return false;
-    }
-    return projectedData.texte.trim() === section.text.trim() || projectedData.numero === section.label;
-  };
+    if (!searchSongQuery.trim()) return allSongsCache.slice(0, 20);
+    const q = searchSongQuery.toLowerCase().trim();
+    return allSongsCache.filter(s => 
+      s.number.includes(q) || 
+      s.title.toLowerCase().includes(q)
+    ).slice(0, 30);
+  }, [allSongsCache, searchSongQuery]);
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-slate-950 text-slate-100 overflow-hidden font-sans select-none">
+    <div className="flex flex-col h-screen w-full bg-slate-950 text-slate-100 font-sans select-none overflow-hidden">
       
-      {/* 1. TOP HEADER */}
-      <header className="flex items-center justify-between px-3.5 py-2.5 bg-slate-900 border-b border-slate-800 shadow-lg flex-shrink-0">
-        <div className="flex items-center space-x-2.5">
-          <div className="p-2 bg-amber-500/15 rounded-xl border border-amber-500/30 text-amber-400">
+      {/* ==================== BARRE SUPÉRIEURE (HEADER) ==================== */}
+      <header className="h-16 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-4 shrink-0 shadow-md">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400">
             <Music className="w-5 h-5" />
           </div>
           <div>
-            <h1 className="text-sm font-black tracking-wide text-slate-100 uppercase">Télécommande Régie</h1>
-            <p className="text-[10px] font-medium text-amber-400/90 flex items-center gap-1">
-              <span>{connected ? `Régie synchronisée (${songs.length} chants)` : 'Déconnecté du PC'}</span>
-              {lastSyncTime && <span className="text-slate-400 hidden sm:inline">• {lastSyncTime}</span>}
+            <h1 className="font-bold text-base text-white tracking-tight flex items-center gap-2">
+              Télécommande Culte
+              {connected ? (
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                  <Wifi className="w-3 h-3 mr-1 inline" /> En ligne
+                </span>
+              ) : (
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-rose-500/20 text-rose-400 border border-rose-500/30">
+                  <WifiOff className="w-3 h-3 mr-1 inline" /> Hors ligne
+                </span>
+              )}
+            </h1>
+            <p className="text-[11px] text-slate-400">
+              {connected ? `Régie: ${serverIp}:${serverPort}` : 'Non connecté au PC'}
             </p>
           </div>
         </div>
 
-        {/* Connection status button */}
-        <button 
-          onClick={() => setShowConnectionConfig(!showConnectionConfig)}
-          className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-full text-xs font-bold transition shadow ${
-            connected 
-              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30' 
-              : 'bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse'
-          }`}
-        >
-          {connected ? <Wifi className="w-3.5 h-3.5 text-emerald-400" /> : <WifiOff className="w-3.5 h-3.5 text-rose-400" />}
-          <span>{connected ? 'Régie PC OK' : 'Connexion IP'}</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleManualSync}
+            disabled={isSyncing}
+            className={`p-2.5 rounded-xl bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 active:scale-95 transition-all border border-slate-700 ${isSyncing ? 'animate-spin text-amber-400' : ''}`}
+            title="Actualiser le programme"
+          >
+            <RefreshCw className="w-5 h-5" />
+          </button>
+          <button
+            onClick={() => setShowConfigModal(true)}
+            className="p-2.5 rounded-xl bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 active:scale-95 transition-all border border-slate-700"
+            title="Paramètres de connexion"
+          >
+            <Sliders className="w-5 h-5" />
+          </button>
+        </div>
       </header>
 
-      {/* 2. CONNECTION CONFIG DRAWER */}
-      {showConnectionConfig && (
-        <div className="bg-slate-900 border-b border-amber-500/40 p-4 shadow-2xl z-50 animate-in slide-in-from-top-2 flex-shrink-0">
-          <div className="flex items-center justify-between mb-2">
-            <h2 className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
-              <Laptop className="w-3.5 h-3.5" /> Adresse IP de la Régie PC
-            </h2>
-            <button 
-              onClick={() => setShowConnectionConfig(false)}
-              className="p-1 hover:bg-slate-800 rounded-md text-slate-400"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-
-          <p className="text-[11px] text-slate-400 mb-2">
-            Entrez l'adresse IP affichée dans la fenêtre <strong>Partager / Réseau</strong> sur le logiciel MaAndiko de votre ordinateur.
-          </p>
-
-          <div className="flex gap-2 mb-2">
-            <input 
-              type="text" 
-              value={serverIp}
-              onChange={(e) => setServerIp(e.target.value)}
-              placeholder="Ex: 192.168.1.50"
-              className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 font-mono focus:outline-none focus:border-amber-400"
-            />
-            <input 
-              type="text" 
-              value={serverPort}
-              onChange={(e) => setServerPort(e.target.value)}
-              placeholder="3000"
-              className="w-16 bg-slate-800 border border-slate-700 rounded-lg px-2 py-2 text-xs text-slate-100 font-mono focus:outline-none focus:border-amber-400 text-center"
-            />
-            <button 
-              onClick={() => connectSocket(serverIp, serverPort)}
-              disabled={isConnecting}
-              className="bg-amber-500 hover:bg-amber-600 active:bg-amber-700 disabled:opacity-50 text-slate-950 font-bold px-3 py-2 rounded-lg text-xs transition flex items-center gap-1 shadow"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${isConnecting ? 'animate-spin' : ''}`} />
-              <span>{isConnecting ? 'Connexion...' : 'Synchroniser'}</span>
-            </button>
-          </div>
-
-          {connected && (
-            <p className="text-[11px] text-emerald-400 flex items-center gap-1 bg-emerald-500/10 p-2 rounded-lg border border-emerald-500/30">
-              <Check className="w-4 h-4 flex-shrink-0" /> Connecté avec succès à la régie ! {songs.length} cantiques synchronisés en temps réel.
-            </p>
-          )}
-
-          {connectionError && (
-            <p className="text-[11px] text-rose-400 flex items-center gap-1.5 bg-rose-500/10 p-2 rounded-lg border border-rose-500/30 mt-1">
-              <AlertCircle className="w-4 h-4 flex-shrink-0" />
-              <span>{connectionError}</span>
-            </p>
-          )}
-        </div>
-      )}
-
-      {/* 3. LIVE MONITOR & RAPID PROJECTION CONTROLS */}
-      <div className="bg-slate-900/95 border-b border-slate-800 px-3.5 py-2 shadow-md flex items-center justify-between gap-2 flex-shrink-0">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5 mb-0.5">
-            <span className={`w-2 h-2 rounded-full ${projectedData?.texte && projectedData?.sermonId !== 'BLACK' && projectedData?.animPhase !== 'EXITING' ? 'bg-emerald-400 animate-ping' : 'bg-slate-600'}`} />
-            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-              {projectedData?.texte && projectedData?.sermonId !== 'BLACK' && projectedData?.animPhase !== 'EXITING' ? 'En Direct sur Écran' : 'Écran Noir / Inactif'}
-            </span>
-          </div>
-          <p className="text-xs font-bold text-amber-300 truncate">
-            {projectedData?.titre_francais || 'Aucun cantique projeté'}
-          </p>
-          {projectedData?.numero && (
-            <p className="text-[10px] font-mono text-slate-400 truncate">
-              {projectedData.numero} • {projectedData.texte?.substring(0, 45)}...
-            </p>
+      {/* ==================== BANDEAU LIVE (MONITEUR TEMPS RÉEL) ==================== */}
+      <div className={`shrink-0 px-4 py-2.5 border-b transition-colors duration-200 flex items-center justify-between gap-3 ${
+        projectedData ? 'bg-amber-950/40 border-amber-500/30' : 'bg-slate-900/60 border-slate-800'
+      }`}>
+        <div className="flex items-center gap-2.5 min-w-0 flex-1">
+          {projectedData ? (
+            <>
+              <span className="flex h-3 w-3 relative shrink-0">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="text-[10px] uppercase font-bold tracking-wider text-emerald-400">
+                  En Direct : {projectedData.titre_francais || projectedData.sermonId} • {projectedData.numero}
+                </p>
+                <p className="text-xs text-slate-200 truncate font-medium">
+                  {projectedData.texte.replace(/\n/g, ' ')}
+                </p>
+              </div>
+            </>
+          ) : (
+            <div className="flex items-center gap-2 text-slate-400 text-xs">
+              <EyeOff className="w-4 h-4 text-slate-500" />
+              <span>Aucune projection en cours (Écran noir)</span>
+            </div>
           )}
         </div>
 
-        {/* Quick actions: Prev / Next / Black */}
-        <div className="flex items-center gap-1.5 flex-shrink-0">
-          <button 
-            onClick={() => handleNavigateSection('prev')}
-            className="p-2 bg-slate-800 hover:bg-slate-700 active:bg-slate-650 text-slate-200 rounded-lg text-xs font-bold border border-slate-700 transition"
-            title="Strophe précédente"
-          >
-            <ChevronLeft className="w-4 h-4" />
-          </button>
-          <button 
-            onClick={() => handleNavigateSection('next')}
-            className="p-2 bg-slate-800 hover:bg-slate-700 active:bg-slate-650 text-slate-200 rounded-lg text-xs font-bold border border-slate-700 transition"
-            title="Strophe suivante"
-          >
-            <ChevronRight className="w-4 h-4" />
-          </button>
-          <button 
-            onClick={handleClearProjection}
-            className="flex items-center gap-1 px-2.5 py-2 bg-rose-600 hover:bg-rose-500 active:bg-rose-700 text-white rounded-lg text-xs font-bold transition shadow"
-            title="Masquer l'écran (Écran noir)"
+        {projectedData && (
+          <button
+            onClick={handleBlackScreen}
+            className="shrink-0 px-3 py-1.5 rounded-lg bg-rose-600/20 text-rose-300 hover:bg-rose-600 hover:text-white border border-rose-500/30 text-xs font-semibold flex items-center gap-1.5 active:scale-95 transition-all"
           >
             <EyeOff className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Masquer</span>
+            <span>Couper</span>
           </button>
-        </div>
+        )}
       </div>
 
-      {/* 4. SONG SELECTION BAR & MODAL TRIGGER */}
-      <div className="bg-slate-900/80 border-b border-slate-800 px-3.5 py-2 flex items-center justify-between gap-2 flex-shrink-0">
-        <button
-          onClick={() => setShowSongPickerModal(true)}
-          className="flex-1 flex items-center justify-between bg-slate-800/90 hover:bg-slate-750 active:bg-slate-700 border border-slate-700 px-3 py-2 rounded-xl text-xs transition group shadow-sm"
-        >
-          <div className="flex items-center gap-2 min-w-0">
-            <Search className="w-4 h-4 text-amber-400 flex-shrink-0 group-hover:scale-110 transition-transform" />
-            {selectedSong ? (
-              <span className="truncate text-slate-200 font-bold">
-                <span className="text-amber-400 font-mono">N° {selectedSong.number}</span> - {selectedSong.title}
-              </span>
-            ) : (
-              <span className="text-slate-400 font-medium">Rechercher parmi les cantiques de la régie...</span>
-            )}
-          </div>
-          <span className="text-[10px] uppercase font-black tracking-wider text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-md border border-amber-500/30 flex-shrink-0 ml-2">
-            Changer
-          </span>
-        </button>
+      {/* ==================== CORPS PRINCIPAL ==================== */}
+      <main className="flex-1 overflow-hidden flex flex-col relative">
 
-        {/* Worship program setlist counter / toggle */}
-        <button
-          onClick={() => {
-            setActiveTab(activeTab === 'program' ? 'all' : 'program');
-          }}
-          className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition border flex-shrink-0 shadow-sm ${
-            activeTab === 'program'
-              ? 'bg-amber-500 text-slate-950 border-amber-400 font-black'
-              : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-750'
-          }`}
-          title="Afficher le programme du culte"
-        >
-          <ListPlus className="w-3.5 h-3.5" />
-          <span>Prog ({programSongs.length})</span>
-        </button>
-      </div>
-
-      {/* 5. HORIZONTAL QUICK SONG SELECTOR STRIP */}
-      {filteredSongs.length > 0 && (
-        <div className="bg-slate-950 border-b border-slate-800/80 px-3 py-1.5 flex items-center gap-1.5 overflow-x-auto scrollbar-none flex-shrink-0">
-          {filteredSongs.slice(0, 20).map(song => {
-            const isSelected = selectedSong?.id === song.id;
-            const inProg = programSongs.some(p => p.id === song.id);
-            return (
-              <button
-                key={song.id}
-                onClick={() => setSelectedSong(song)}
-                className={`flex-shrink-0 px-2.5 py-1 rounded-lg text-xs font-bold transition border flex items-center gap-1.5 ${
-                  isSelected
-                    ? 'bg-amber-500 text-slate-950 border-amber-400 shadow-md ring-1 ring-amber-400 font-black'
-                    : 'bg-slate-900 hover:bg-slate-850 text-slate-300 border-slate-800'
-                }`}
-              >
-                <span>N° {song.number}</span>
-                <span className="font-normal truncate max-w-[100px]">{song.title}</span>
-                {inProg && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0" />}
-              </button>
-            );
-          })}
-          {filteredSongs.length > 20 && (
-            <button
-              onClick={() => setShowSongPickerModal(true)}
-              className="flex-shrink-0 px-2.5 py-1 rounded-lg text-[11px] font-bold text-amber-400 bg-amber-500/10 border border-amber-500/30 hover:bg-amber-500/20"
-            >
-              + {filteredSongs.length - 20} autres...
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* 6. MAIN BODY: SELECTED SONG STANZAS / CHORUSES CARDS */}
-      <main className="flex-1 overflow-y-auto p-3 space-y-3">
-        {loadingSongs ? (
-          <div className="flex flex-col items-center justify-center h-56 text-center text-slate-400 text-xs space-y-3">
-            <RefreshCw className="w-8 h-8 text-amber-400 animate-spin" />
-            <p className="font-bold text-slate-200">Synchronisation des cantiques avec la régie PC...</p>
-            <p className="text-[11px] text-slate-500">Veuillez patienter pendant la réception des paroles.</p>
-          </div>
-        ) : !connected && songs.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-64 text-center text-slate-400 text-xs space-y-3 px-4">
-            <WifiOff className="w-12 h-12 text-rose-500/70" />
-            <p className="text-sm font-bold text-slate-200">Non connecté à la Régie PC</p>
-            <p className="text-[11px] text-slate-400 max-w-xs">
-              Pour recueillir les cantiques de votre régie, renseignez l'adresse IP du PC et touchez Se connecter.
-            </p>
-            <button
-              onClick={() => setShowConnectionConfig(true)}
-              className="mt-2 px-4 py-2.5 bg-amber-500 hover:bg-amber-400 active:bg-amber-600 text-slate-950 font-bold rounded-xl shadow-lg flex items-center gap-2 transition"
-            >
-              <Sliders className="w-4 h-4" />
-              <span>Configurer l'IP de la Régie</span>
-            </button>
-          </div>
-        ) : selectedSong ? (
-          <div className="space-y-3">
-            {/* Song Header Card */}
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-3.5 shadow-md flex items-center justify-between gap-2">
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="px-2.5 py-0.5 rounded-md bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-mono font-black">
-                    N° {selectedSong.number}
-                  </span>
-                  <h2 className="text-sm font-extrabold text-slate-100 truncate">
-                    {selectedSong.title}
-                  </h2>
-                </div>
-                <div className="flex items-center gap-2 mt-1 text-[10px] text-slate-400">
-                  {selectedSong.category && <span>{selectedSong.category}</span>}
-                  {selectedSong.keySignature && <span className="px-1.5 py-0.2 bg-slate-800 rounded border border-slate-700 font-mono text-amber-400 font-bold">{selectedSong.keySignature}</span>}
-                  {selectedSong.author && <span className="truncate">• {selectedSong.author}</span>}
-                </div>
+        {/* ---------------- VUE 1 : PROGRAMME DU CULTE ---------------- */}
+        {!selectedSong ? (
+          <div className="flex-1 flex flex-col overflow-hidden p-4">
+            
+            {/* Titre de section + Bouton d'ajout */}
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                  <ListOrdered className="w-5 h-5 text-amber-400" />
+                  Programme du Culte
+                </h2>
+                <p className="text-xs text-slate-400">
+                  {programItems.filter(i => i.type === 'song').length} chant(s) synchronisé(s) avec la régie
+                </p>
               </div>
 
-              {/* Add / Remove from Program Button */}
               <button
-                onClick={() => toggleProgram(selectedSong)}
-                className={`p-2 rounded-xl text-xs font-bold border transition flex items-center gap-1 flex-shrink-0 ${
-                  programSongs.some(p => p.id === selectedSong.id)
-                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                    : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-750'
-                }`}
-                title="Ajouter / Retirer du programme du culte"
+                onClick={() => setShowAddSongModal(true)}
+                className="px-3 py-2 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs flex items-center gap-1.5 shadow-lg shadow-amber-500/20 active:scale-95 transition-transform"
               >
-                <ListPlus className="w-4 h-4" />
-                <span className="text-[11px]">
-                  {programSongs.some(p => p.id === selectedSong.id) ? 'Au Programme' : '+ Prog'}
-                </span>
+                <PlusCircle className="w-4 h-4" />
+                <span>Ajouter</span>
               </button>
             </div>
 
-            {/* STANZAS & CHORUSES CARDS */}
-            <div className="space-y-2.5">
-              {selectedSong.sections && selectedSong.sections.length > 0 ? (
-                selectedSong.sections.map((section, idx) => {
-                  const live = isCurrentSectionLive(section);
-                  const isChorus = (section.type || '').toLowerCase().includes('refrain') || (section.label || '').toLowerCase().includes('refrain');
+            {/* Liste des chants du programme */}
+            <div className="flex-1 overflow-y-auto space-y-2.5 pr-1 pb-4">
+              {programItems.length === 0 ? (
+                <div className="h-64 flex flex-col items-center justify-center text-center p-6 bg-slate-900/50 rounded-2xl border border-slate-800">
+                  <Music className="w-12 h-12 text-slate-600 mb-3 animate-pulse" />
+                  <p className="text-sm font-semibold text-slate-300">Aucun chant dans le programme</p>
+                  <p className="text-xs text-slate-500 mt-1 max-w-xs">
+                    Préparez le programme sur le PC de régie ou touchez « Ajouter » pour sélectionner un cantique.
+                  </p>
+                  <button
+                    onClick={handleManualSync}
+                    className="mt-4 px-4 py-2 rounded-xl bg-slate-800 text-amber-400 border border-slate-700 text-xs font-semibold flex items-center gap-2"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                    Actualiser depuis le PC
+                  </button>
+                </div>
+              ) : (
+                programItems.map((item, idx) => {
+                  if (item.type === 'note') {
+                    return (
+                      <div key={item.id || idx} className="p-3.5 bg-slate-900/70 border border-slate-800 rounded-xl">
+                        <p className="text-xs font-bold text-amber-400">📌 {item.title}</p>
+                        {item.note && <p className="text-xs text-slate-400 mt-0.5">{item.note}</p>}
+                      </div>
+                    );
+                  }
+
+                  const isCurrentlyProjected = projectedData?.titre_francais?.includes(item.title);
 
                   return (
                     <div
-                      key={section.id || idx}
-                      onClick={() => handleProjectSection(selectedSong, section, idx)}
-                      className={`relative p-3.5 rounded-xl border transition-all duration-150 cursor-pointer shadow-sm overflow-hidden active:scale-[0.99] ${
-                        live
-                          ? 'bg-emerald-950/90 border-emerald-400 ring-2 ring-emerald-500/50 shadow-emerald-950/50'
-                          : isChorus
-                          ? 'bg-slate-900/95 hover:bg-slate-850 border-rose-500/30'
-                          : 'bg-slate-900/90 hover:bg-slate-850 border-slate-800'
+                      key={item.id || idx}
+                      onClick={() => handleOpenSongFromProgram(item, idx)}
+                      className={`p-4 rounded-2xl border transition-all cursor-pointer flex items-center justify-between gap-3 active:scale-[0.98] ${
+                        isCurrentlyProjected
+                          ? 'bg-amber-950/40 border-amber-500/50 shadow-lg shadow-amber-500/10'
+                          : 'bg-slate-900/90 border-slate-800 hover:border-slate-700 hover:bg-slate-850'
                       }`}
                     >
-                      {/* Left accent bar */}
-                      <div 
-                        className="absolute left-0 top-0 bottom-0 w-1.5"
-                        style={{ backgroundColor: section.color || (isChorus ? '#e11d48' : '#2563eb') }}
-                      />
-
-                      {/* Header of the Stanza Card */}
-                      <div className="flex items-center justify-between pb-1.5 mb-1.5 border-b border-slate-800/80">
-                        <div className="flex items-center gap-2">
-                          <span 
-                            className="w-2 h-2 rounded-full"
-                            style={{ backgroundColor: section.color || (isChorus ? '#e11d48' : '#2563eb') }}
-                          />
-                          <span className={`text-xs font-black uppercase tracking-wider ${isChorus ? 'text-rose-400' : 'text-sky-400'}`}>
-                            {section.label || (isChorus ? 'Refrain' : `Couplet ${idx + 1}`)}
-                          </span>
+                      <div className="flex items-center gap-3.5 min-w-0">
+                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-sm font-black shrink-0 ${
+                          isCurrentlyProjected 
+                            ? 'bg-amber-500 text-slate-950' 
+                            : 'bg-slate-800 text-amber-400 border border-slate-700'
+                        }`}>
+                          {idx + 1}
                         </div>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="px-2 py-0.5 rounded bg-slate-800 text-[10px] font-bold text-amber-400 border border-slate-700">
+                              N° {item.number}
+                            </span>
+                            <span className="text-[11px] text-slate-400 truncate">
+                              {item.category || "Cantiques de l'Épouse"}
+                            </span>
+                          </div>
+                          <h3 className="font-bold text-sm text-white truncate mt-0.5">
+                            {item.title}
+                          </h3>
+                          <p className="text-[11px] text-slate-400 mt-0.5">
+                            {item.song?.sections?.length || 0} strophe(s) / refrain(s)
+                          </p>
+                        </div>
+                      </div>
 
-                        {live ? (
-                          <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] font-black animate-pulse">
-                            <Radio className="w-3 h-3 text-emerald-400" />
-                            <span>EN DIRECT</span>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {isCurrentlyProjected && (
+                          <span className="px-2 py-1 rounded-md bg-emerald-500/20 text-emerald-400 text-[10px] font-bold border border-emerald-500/30">
+                            LIVE
                           </span>
-                        ) : (
-                          <span className="text-[10px] text-slate-500 font-semibold">
-                            Toucher pour projeter
+                        )}
+                        <ChevronRight className="w-5 h-5 text-slate-500" />
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        ) : (
+
+          /* ---------------- VUE 2 : DÉTAIL DES PAROLES D'UN CHANT ---------------- */
+          <div className="flex-1 flex flex-col overflow-hidden">
+            
+            {/* Header du Chant */}
+            <div className="p-3.5 bg-slate-900 border-b border-slate-800 flex items-center justify-between gap-3 shrink-0">
+              <button
+                onClick={() => setSelectedSong(null)}
+                className="px-3 py-2 rounded-xl bg-slate-800 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 active:scale-95"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                <span>Programme</span>
+              </button>
+
+              <div className="text-center min-w-0 flex-1">
+                <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-400 text-[10px] font-bold border border-amber-500/30">
+                  N° {selectedSong.number}
+                </span>
+                <h2 className="font-bold text-sm text-white truncate mt-0.5">
+                  {selectedSong.title}
+                </h2>
+              </div>
+
+              <button
+                onClick={handleBlackScreen}
+                className="p-2 rounded-xl bg-rose-600/20 text-rose-300 border border-rose-500/30 hover:bg-rose-600 hover:text-white active:scale-95"
+                title="Écran Noir"
+              >
+                <EyeOff className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Barre de navigation rapide Strophe Précédente / Suivante */}
+            <div className="grid grid-cols-2 gap-2 p-3 bg-slate-900/60 border-b border-slate-800 shrink-0">
+              <button
+                onClick={handlePrevSection}
+                className="py-2.5 px-3 rounded-xl bg-slate-800 text-slate-200 border border-slate-700 font-bold text-xs flex items-center justify-center gap-2 active:scale-95 transition-transform"
+              >
+                <ChevronLeft className="w-4 h-4" />
+                <span>Strophe Précédente</span>
+              </button>
+              <button
+                onClick={handleNextSection}
+                className="py-2.5 px-3 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 active:scale-95 shadow-md shadow-amber-500/20 transition-transform"
+              >
+                <span>Strophe Suivante</span>
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Liste des Strophes & Refrains */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-3 pb-8">
+              {selectedSong.sections && selectedSong.sections.length > 0 ? (
+                selectedSong.sections.map((section, sIdx) => {
+                  const isCurrent = projectedData?.texte === section.text;
+                  const isRefrain = section.label.toLowerCase().includes('refrain') || section.type === 'refrain';
+
+                  return (
+                    <div
+                      key={section.id || sIdx}
+                      onClick={() => handleProjectSection(selectedSong, section)}
+                      className={`p-4 rounded-2xl border transition-all cursor-pointer relative overflow-hidden active:scale-[0.98] ${
+                        isCurrent
+                          ? 'bg-amber-950/60 border-emerald-500 ring-2 ring-emerald-500 shadow-xl'
+                          : isRefrain
+                          ? 'bg-amber-950/20 border-amber-500/30 hover:border-amber-500/50'
+                          : 'bg-slate-900/90 border-slate-800 hover:border-slate-700'
+                      }`}
+                    >
+                      {/* En-tête de strophe */}
+                      <div className="flex items-center justify-between mb-2">
+                        <span className={`px-2.5 py-1 rounded-lg text-xs font-bold ${
+                          isCurrent
+                            ? 'bg-emerald-500 text-slate-950'
+                            : isRefrain
+                            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                            : 'bg-slate-800 text-slate-300 border border-slate-700'
+                        }`}>
+                          {section.label}
+                        </span>
+
+                        {isCurrent && (
+                          <span className="flex items-center gap-1.5 text-xs font-black text-emerald-400 animate-pulse">
+                            <Radio className="w-3.5 h-3.5" />
+                            EN DIRECT
                           </span>
                         )}
                       </div>
 
-                      {/* Stanza Lyrics */}
-                      <p className="whitespace-pre-line text-xs leading-relaxed text-slate-200 font-serif pl-1">
+                      {/* Paroles */}
+                      <p className="text-sm sm:text-base font-medium text-slate-100 whitespace-pre-line leading-relaxed">
                         {section.text}
                       </p>
                     </div>
                   );
                 })
               ) : (
-                <div className="p-6 text-center text-xs text-slate-400 bg-slate-900 rounded-xl border border-slate-800">
-                  Ce cantique n'a pas encore de strophes découpées sur la régie.
+                <div className="p-8 text-center text-slate-500">
+                  <p className="text-sm">Aucune strophe enregistrée pour ce chant.</p>
                 </div>
               )}
             </div>
           </div>
-        ) : (
-          <div className="flex flex-col items-center justify-center h-64 text-center text-slate-400 text-xs space-y-3 px-4">
-            <Music className="w-12 h-12 text-slate-600 animate-pulse" />
-            <p className="text-sm font-bold text-slate-200">Choisissez un cantique</p>
-            <p className="text-[11px] text-slate-400 max-w-xs">
-              Touchez le bouton ci-dessous pour rechercher par numéro ou par titre parmi les cantiques de la régie.
-            </p>
-            <button
-              onClick={() => setShowSongPickerModal(true)}
-              className="mt-2 px-4 py-2.5 bg-amber-500 hover:bg-amber-400 active:bg-amber-600 text-slate-950 font-bold rounded-xl shadow-lg flex items-center gap-2 transition"
-            >
-              <Search className="w-4 h-4" />
-              <span>Ouvrir la liste des chants ({songs.length})</span>
-            </button>
-          </div>
         )}
       </main>
 
-      {/* 7. FULLSCREEN SONG PICKER MODAL */}
-      {showSongPickerModal && (
-        <div className="fixed inset-0 z-50 bg-slate-950/95 flex flex-col animate-in fade-in duration-150">
-          {/* Modal Header */}
-          <div className="p-3 bg-slate-900 border-b border-slate-800 flex items-center justify-between gap-2 flex-shrink-0">
-            <div className="flex items-center gap-2">
-              <BookOpen className="w-4 h-4 text-amber-400" />
-              <h2 className="text-sm font-black text-slate-100 uppercase tracking-wide">
-                Cantiques de la Régie ({songs.length})
-              </h2>
-            </div>
-            <button 
-              onClick={() => setShowSongPickerModal(false)}
-              className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
-
-          {/* Search Input & Recueil Chips */}
-          <div className="p-3 bg-slate-900/70 border-b border-slate-800 space-y-2 flex-shrink-0">
-            <div className="relative">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-              <input
-                type="text"
-                autoFocus
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Numéro (ex: 45) ou titre (ex: Crois Seulement)..."
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-9 pr-8 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-400"
-              />
-              {searchQuery && (
-                <button 
-                  onClick={() => setSearchQuery('')}
-                  className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-200"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              )}
+      {/* ==================== MODAL RECHERCHE EXPRESS / AJOUT CHANT ==================== */}
+      {showAddSongModal && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex flex-col p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl flex-1 flex flex-col overflow-hidden max-w-lg w-full mx-auto shadow-2xl">
+            
+            {/* Header Modal */}
+            <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+              <h3 className="font-bold text-white text-base flex items-center gap-2">
+                <Search className="w-5 h-5 text-amber-400" />
+                Ajouter un Cantique
+              </h3>
+              <button
+                onClick={() => setShowAddSongModal(false)}
+                className="p-1.5 rounded-lg bg-slate-800 text-slate-400 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
             </div>
 
-            {/* Recueils Filter Badges */}
-            {recueils.length > 0 && (
-              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none">
-                <button
-                  onClick={() => setSelectedRecueilId('all')}
-                  className={`px-2.5 py-1 rounded-lg text-xs font-bold whitespace-nowrap transition border ${
-                    selectedRecueilId === 'all'
-                      ? 'bg-amber-500 text-slate-950 border-amber-400'
-                      : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-750'
-                  }`}
-                >
-                  Tous ({songs.length})
-                </button>
-                {recueils.map(r => {
-                  const isSel = selectedRecueilId === r.id;
-                  return (
-                    <button
-                      key={r.id}
-                      onClick={() => setSelectedRecueilId(r.id)}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-bold whitespace-nowrap transition border ${
-                        isSel
-                          ? 'bg-amber-500 text-slate-950 border-amber-400'
-                          : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-750'
-                      }`}
-                    >
-                      {r.title}
-                    </button>
-                  );
-                })}
+            {/* Champ de recherche */}
+            <div className="p-4 border-b border-slate-800 bg-slate-950/50">
+              <div className="relative">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={searchSongQuery}
+                  onChange={(e) => setSearchSongQuery(e.target.value)}
+                  placeholder="Tapez le numéro (ex: 45) ou un titre..."
+                  className="w-full bg-slate-900 border border-slate-700 rounded-xl pl-10 pr-4 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-amber-500"
+                  autoFocus
+                />
               </div>
-            )}
-          </div>
+            </div>
 
-          {/* Song List in Modal */}
-          <div className="flex-1 overflow-y-auto p-3 space-y-1.5">
-            {filteredSongs.length > 0 ? (
-              filteredSongs.map(s => {
-                const isSelected = selectedSong?.id === s.id;
-                const inProg = programSongs.some(p => p.id === s.id);
-
-                return (
+            {/* Résultats de recherche */}
+            <div className="flex-1 overflow-y-auto p-3 space-y-2">
+              {filteredSongs.length === 0 ? (
+                <div className="p-8 text-center text-slate-500">
+                  <p className="text-sm">Aucun cantique trouvé.</p>
+                </div>
+              ) : (
+                filteredSongs.map((song) => (
                   <div
-                    key={s.id}
-                    onClick={() => {
-                      setSelectedSong(s);
-                      setShowSongPickerModal(false);
-                    }}
-                    className={`p-3 rounded-xl border flex items-center justify-between gap-3 cursor-pointer transition active:scale-[0.99] ${
-                      isSelected
-                        ? 'bg-amber-500/15 border-amber-400 text-amber-200 shadow-md ring-1 ring-amber-400/40'
-                        : 'bg-slate-900/90 hover:bg-slate-850 border-slate-800 text-slate-200'
-                    }`}
+                    key={song.id}
+                    onClick={() => handleAddSongToProgram(song)}
+                    className="p-3 bg-slate-850 hover:bg-slate-800 border border-slate-700/60 rounded-xl flex items-center justify-between cursor-pointer active:scale-[0.98] transition-transform"
                   >
-                    <div className="flex items-center gap-3 min-w-0">
-                      <span className="w-11 h-9 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center text-xs font-mono font-black text-amber-400 flex-shrink-0">
-                        {s.number}
+                    <div className="flex items-center gap-3">
+                      <span className="w-9 h-9 rounded-lg bg-amber-500/20 border border-amber-500/30 text-amber-400 font-bold text-xs flex items-center justify-center shrink-0">
+                        {song.number}
                       </span>
                       <div className="min-w-0">
-                        <h3 className="text-xs font-bold truncate text-slate-100">{s.title}</h3>
-                        <p className="text-[10px] text-slate-400 truncate">
-                          {s.category || 'Cantique'} • {s.sections?.length || 0} strophe{s.sections?.length > 1 ? 's' : ''}
-                        </p>
+                        <p className="font-bold text-sm text-white truncate">{song.title}</p>
+                        <p className="text-[11px] text-slate-400">{song.category || "Cantiques de l'Épouse"}</p>
                       </div>
                     </div>
-
-                    <div className="flex items-center gap-1.5 flex-shrink-0">
-                      {inProg && (
-                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold">
-                          Prog
-                        </span>
-                      )}
-                      <ChevronRight className="w-4 h-4 text-slate-500" />
-                    </div>
+                    <PlusCircle className="w-5 h-5 text-amber-400 shrink-0" />
                   </div>
-                );
-              })
-            ) : (
-              <div className="p-8 text-center text-xs text-slate-500 space-y-2">
-                <Search className="w-8 h-8 mx-auto text-slate-700" />
-                <p>Aucun cantique ne correspond à votre recherche.</p>
-              </div>
-            )}
+                ))
+              )}
+            </div>
           </div>
         </div>
       )}
 
-      {/* 8. BOTTOM FOOTER BAR */}
-      <footer className="bg-slate-900 border-t border-slate-800 px-3.5 py-2 flex items-center justify-between text-xs text-slate-400 flex-shrink-0">
-        <span className="font-mono text-[11px]">
-          {filteredSongs.length} chant{filteredSongs.length > 1 ? 's' : ''} {activeTab === 'program' ? 'au programme' : 'synchronisés'}
-        </span>
-        <button 
-          onClick={handleManualSync}
-          className="flex items-center gap-1 text-amber-400 font-bold hover:underline py-1 px-2 rounded-lg hover:bg-slate-800 transition"
-        >
-          <RefreshCw className="w-3.5 h-3.5" /> Re-synchroniser
-        </button>
-      </footer>
+      {/* ==================== MODAL CONFIGURATION IP PC ==================== */}
+      {showConfigModal && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-sm p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h3 className="font-bold text-white text-base flex items-center gap-2">
+                <Sliders className="w-5 h-5 text-amber-400" />
+                Connexion Régie PC
+              </h3>
+              <button
+                onClick={() => setShowConfigModal(false)}
+                className="p-1 rounded-lg text-slate-400 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Adresse IP du PC de régie
+                </label>
+                <input
+                  type="text"
+                  value={serverIp}
+                  onChange={(e) => setServerIp(e.target.value)}
+                  placeholder="Ex: 192.168.1.35"
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white font-mono placeholder-slate-600 focus:outline-none focus:border-amber-500"
+                />
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Visible sur le PC dans Menu &gt; Télécommande Mobile
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Port du serveur
+                </label>
+                <input
+                  type="text"
+                  value={serverPort}
+                  onChange={(e) => setServerPort(e.target.value)}
+                  placeholder="3000"
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white font-mono placeholder-slate-600 focus:outline-none focus:border-amber-500"
+                />
+              </div>
+            </div>
+
+            <div className="pt-2 flex gap-2">
+              <button
+                onClick={() => setShowConfigModal(false)}
+                className="flex-1 py-2.5 rounded-xl bg-slate-800 text-slate-300 text-xs font-semibold hover:bg-slate-700"
+              >
+                Annuler
+              </button>
+              <button
+                onClick={() => {
+                  connectToServer(serverIp, serverPort);
+                  setShowConfigModal(false);
+                }}
+                className="flex-1 py-2.5 rounded-xl bg-amber-500 text-slate-950 text-xs font-bold hover:bg-amber-400 shadow-md shadow-amber-500/20"
+              >
+                Connecter
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

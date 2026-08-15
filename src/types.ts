@@ -27,6 +27,17 @@ export interface Song {
   sections: SongSection[];
 }
 
+export interface ProgramItem {
+  id: string;
+  songId?: string;
+  type: 'song' | 'note';
+  title: string;
+  number?: string;
+  category?: string;
+  note?: string;
+  song?: Song;
+}
+
 export interface ProjectedData {
   sermonId: string;
   numero: number | string;
