@@ -30,21 +30,45 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install NPM Dependencies
-        run: npm install
+      - name: Determine Project Directory
+        id: proj-dir
+        run: |
+          if [ -d "remote-app" ]; then
+            echo "DIR=remote-app" >> $GITHUB_OUTPUT
+          else
+            echo "DIR=." >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install Root Dependencies
+        run: |
+          npm install
+
+      - name: Install Remote App Dependencies
+        run: |
+          if [ "${{ steps.proj-dir.outputs.DIR }}" = "remote-app" ]; then
+            cd remote-app
+            npm install
+          fi
 
       - name: Build Web Application
-        run: npm run build
+        run: |
+          cd ${{ steps.proj-dir.outputs.DIR }}
+          npm run build
 
       - name: Add and Sync Android Platform
         run: |
+          cd ${{ steps.proj-dir.outputs.DIR }}
           npx cap add android || true
-          npx --yes @capacitor/assets generate --android || true
           npx cap sync android
+
+      - name: Inject MaAndiko Official Icons
+        run: |
+          cd ${{ steps.proj-dir.outputs.DIR }}
+          node generate-android-icons.cjs
 
       - name: Build Android Debug APK
         run: |
-          cd android
+          cd ${{ steps.proj-dir.outputs.DIR }}/android
           chmod +x gradlew
           ./gradlew assembleDebug --stacktrace
 
@@ -52,5 +76,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: MaAndiko-Remote-APK
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ steps.proj-dir.outputs.DIR }}/android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
